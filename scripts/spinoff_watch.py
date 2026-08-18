@@ -42,8 +42,16 @@ FULL_INDEX = "https://www.sec.gov/Archives/edgar/full-index/{year}/QTR{qtr}/form
 ARCHIVE = "https://www.sec.gov/Archives/edgar/data/{cik}/{acc_nodash}/"
 FILING_IDX = "https://www.sec.gov/Archives/edgar/data/{cik}/{acc_nodash}/{acc}-index.htm"
 
-# Form 10 = registration of securities for a spun-off entity.
-SPINOFF_FORMS = {"10-12B", "10-12G", "10-12B/A", "10-12G/A"}
+# 10-12B: registration tied to a DISTRIBUTION — this is the spin-off form.
+SPINOFF_FORMS = {"10-12B", "10-12B/A"}
+# 10-12G: general Section 12(g) registration. Mostly OTC companies, funds and
+# SPACs registering a share class — NOT demergers, so no structural forced
+# seller exists. Off by default; --include-12g to widen the net.
+REGISTRATION_FORMS = {"10-12G", "10-12G/A"}
+
+# XBRL older than this is stale enough to mislead (e.g. a company that stopped
+# filing years ago still returns its last figures as "latest").
+STALE_MONTHS = 18
 
 MIN_INTERVAL = 1.0 / 7.0  # ~7 req/s, under SEC's 10/s ceiling
 
@@ -101,11 +109,12 @@ def quarters_in_range(start: date, end: date):
     return out
 
 
-def parse_form_idx(text: str, start: date, end: date):
+def parse_form_idx(text: str, start: date, end: date, forms=None):
     """
-    Parse EDGAR's fixed-width form.idx and return Form 10 registration rows.
+    Parse EDGAR's fixed-width form.idx and return matching Form 10 rows.
     Columns: Form Type | Company Name | CIK | Date Filed | File Name
     """
+    forms = SPINOFF_FORMS if forms is None else forms
     rows = []
     for line in text.splitlines():
         if not line.strip() or line.startswith(("Form Type", "-", " ")) and not line[:12].strip():
@@ -114,7 +123,7 @@ def parse_form_idx(text: str, start: date, end: date):
         if len(parts) < 5:
             continue
         form = parts[0].strip().upper()
-        if form not in SPINOFF_FORMS:
+        if form not in forms:
             continue
         company, cik_s, dt_s, path = parts[1], parts[2], parts[3], parts[4]
         try:
@@ -137,8 +146,9 @@ def parse_form_idx(text: str, start: date, end: date):
     return rows
 
 
-def discover(f: Fetcher, start: date, end: date):
+def discover(f: Fetcher, start: date, end: date, forms=None):
     """Pull Form 10 registrations from the quarterly full indexes."""
+    forms = SPINOFF_FORMS if forms is None else forms
     seen, out = set(), []
     for (y, q) in quarters_in_range(start, end):
         url = FULL_INDEX.format(year=y, qtr=q)
@@ -147,7 +157,7 @@ def discover(f: Fetcher, start: date, end: date):
         if not txt:
             print(f"  no index for {y} Q{q}", file=sys.stderr)
             continue
-        for row in parse_form_idx(txt, start, end):
+        for row in parse_form_idx(txt, start, end, forms=forms):
             key = (row["cik"], row["accession"])
             if key not in seen:
                 seen.add(key)
@@ -211,6 +221,24 @@ def enrich(f: Fetcher, row: dict):
     for label, hit in got.items():
         row[label] = hit["value"]
         row[f"{label}_asof"] = hit["as_of"]
+
+    # Staleness: EDGAR happily returns a defunct filer's last-ever numbers as
+    # "latest". Flag anything older than STALE_MONTHS so it can't be read as current.
+    dates = [h["as_of"] for h in got.values() if h.get("as_of")]
+    if dates:
+        newest = max(dates)
+        row["xbrl_latest_period"] = newest
+        try:
+            d = datetime.strptime(newest, "%Y-%m-%d").date()
+            months = (date.today() - d).days / 30.44
+            row["xbrl_age_months"] = round(months, 1)
+            if months > STALE_MONTHS:
+                row["xbrl_stale"] = f"STALE ({months/12:.1f}y old)"
+                row["xbrl"] = "stale"
+            else:
+                row["xbrl_stale"] = ""
+        except ValueError:
+            row["xbrl_stale"] = "unparseable date"
     return row
 
 
@@ -263,6 +291,11 @@ def facts_block(row):
     keys = ["shares_out", "shares_dei", "revenue", "revenue_alt", "op_income",
             "net_income", "total_debt", "debt_current", "equity", "cash"]
     lines = []
+    if row.get("xbrl_stale"):
+        lines.append(
+            f"> **WARNING — {row['xbrl_stale']}.** Latest XBRL period is "
+            f"{row.get('xbrl_latest_period','?')}. These numbers are NOT current "
+            f"and may belong to a filer that went dark. Ignore them and read the filing.\n")
     for k in keys:
         if k in row and row[k] is not None:
             v = row[k]
@@ -272,7 +305,8 @@ def facts_block(row):
 
 
 COLUMNS = ["filed", "form", "company", "cik", "ticker", "exchange", "sic_desc",
-           "xbrl", "shares_out", "shares_dei", "revenue", "revenue_alt",
+           "xbrl", "xbrl_stale", "xbrl_latest_period", "xbrl_age_months",
+           "shares_out", "shares_dei", "revenue", "revenue_alt",
            "op_income", "net_income", "total_debt", "debt_current", "equity",
            "cash", "state", "filing_index"]
 
@@ -325,10 +359,18 @@ FIXTURE = """Form Type                             Company Name                 
 def self_test():
     ok = True
 
+    # Default: 10-12B only. The 10-12G row must NOT appear.
     rows = parse_form_idx(FIXTURE, date(2026, 1, 1), date(2026, 8, 18))
     forms = sorted(r["form"] for r in rows)
-    assert forms == ["10-12B", "10-12B/A", "10-12G"], forms
-    print(f"PASS  parse: {len(rows)} spinoff rows, filtered out 10-K/8-K and out-of-range")
+    assert forms == ["10-12B", "10-12B/A"], forms
+    assert not any("Tiny Spinco" in r["company"] for r in rows), "10-12G leaked in by default"
+    print(f"PASS  default forms: {len(rows)} rows, 10-12G excluded, 10-K/8-K/out-of-range dropped")
+
+    # Widened: 10-12G included on request.
+    wide = parse_form_idx(FIXTURE, date(2026, 1, 1), date(2026, 8, 18),
+                          forms=SPINOFF_FORMS | REGISTRATION_FORMS)
+    assert sorted(r["form"] for r in wide) == ["10-12B", "10-12B/A", "10-12G"]
+    print(f"PASS  --include-12g widens to {len(wide)} rows")
 
     assert all(r["cik"] > 0 for r in rows)
     a = [r for r in rows if r["company"].startswith("Amentum")][0]
@@ -354,6 +396,31 @@ def self_test():
     assert sh["value"] == 42000000
     assert _latest_units(fake_cf, "NotATag") is None
     print("PASS  XBRL: picks most recent period, right units, missing tag -> None")
+
+    # Staleness regression — modelled on the real B-Scada case, where EDGAR
+    # returned 2016 figures as "latest" and they read as current.
+    def stale_check(as_of):
+        r = {}
+        got = {"revenue": {"value": 784540, "as_of": as_of}}
+        dates = [h["as_of"] for h in got.values()]
+        newest = max(dates)
+        d = datetime.strptime(newest, "%Y-%m-%d").date()
+        months = (date.today() - d).days / 30.44
+        r["xbrl_stale"] = f"STALE ({months/12:.1f}y old)" if months > STALE_MONTHS else ""
+        r["xbrl_latest_period"] = newest
+        return r
+
+    old = stale_check("2016-04-30")
+    assert old["xbrl_stale"].startswith("STALE"), old
+    fresh = stale_check(date.today().isoformat())
+    assert fresh["xbrl_stale"] == "", fresh
+    print(f"PASS  staleness: 2016 data -> '{old['xbrl_stale']}', current data -> clean")
+
+    warned = facts_block({"revenue": 784540, "revenue_asof": "2016-04-30",
+                          "xbrl_stale": "STALE (10.3y old)",
+                          "xbrl_latest_period": "2016-04-30"})
+    assert "WARNING" in warned and "NOT current" in warned
+    print("PASS  stale warning renders at top of the note's facts block")
 
     tmp = "/tmp/spinoff_selftest"
     os.system(f"rm -rf {tmp}")
@@ -397,6 +464,9 @@ def main():
     ap.add_argument("--end", help="YYYY-MM-DD (default today)")
     ap.add_argument("--out", default="./spinoff_out", help="output dir")
     ap.add_argument("--no-enrich", action="store_true", help="skip XBRL lookups (faster)")
+    ap.add_argument("--include-12g", action="store_true",
+                    help="also capture 10-12G registrations (mostly NOT spin-offs: "
+                         "OTC listings, funds, SPACs). Adds noise; off by default.")
     ap.add_argument("--self-test", action="store_true", help="offline logic test")
     a = ap.parse_args()
 
@@ -410,8 +480,13 @@ def main():
              else end - timedelta(days=a.days))
     print(f"Scanning EDGAR Form 10 registrations {start} .. {end}", file=sys.stderr)
 
+    forms = set(SPINOFF_FORMS)
+    if a.include_12g:
+        forms |= REGISTRATION_FORMS
+    print(f"Forms: {', '.join(sorted(forms))}", file=sys.stderr)
+
     f = Fetcher(a.email)
-    rows = discover(f, start, end)
+    rows = discover(f, start, end, forms=forms)
     print(f"[discover] {len(rows)} Form 10 filings found", file=sys.stderr)
 
     if not a.no_enrich:

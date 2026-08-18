@@ -4,10 +4,11 @@ on:
   schedule:
     # 08:00 Mon Brisbane (AEST, UTC+10) = 22:00 Sun UTC
     - cron: "0 22 * * 0"
-  workflow_dispatch:        # lets you trigger a run by hand from the Actions tab
+  workflow_dispatch:
 
 permissions:
-  contents: write           # needed to commit results back to the repo
+  contents: write
+  issues: write             # so a hit can open an issue as a notification
 
 jobs:
   scan:
@@ -27,7 +28,7 @@ jobs:
           SEC_EMAIL: ${{ secrets.SEC_EMAIL }}
         run: |
           if [ -z "$SEC_EMAIL" ]; then
-            echo "::error::SEC_EMAIL secret not set. Add it in Settings > Secrets and variables > Actions."
+            echo "::error::SEC_EMAIL secret not set. Settings > Secrets and variables > Actions."
             exit 1
           fi
           python scripts/spinoff_watch.py \
@@ -35,19 +36,40 @@ jobs:
             --days 10 \
             --out ./spinoff_out
 
-      - name: Summarise to the run log
+      - name: Count results
+        id: count
+        run: |
+          if [ -f spinoff_out/spinoffs.csv ]; then
+            N=$(($(wc -l < spinoff_out/spinoffs.csv) - 1))
+          else
+            N=0
+          fi
+          if [ "$N" -lt 0 ]; then N=0; fi
+          echo "n=$N" >> $GITHUB_OUTPUT
+          echo "Found $N filings"
+
+      - name: Heartbeat
+        # Always writes, so there is a commit every week even on empty scans.
+        # Without this, GitHub disables the cron after 60 days of no activity.
+        run: |
+          mkdir -p spinoff_out
+          echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)  10-12B filings: ${{ steps.count.outputs.n }}" \
+            >> spinoff_out/scan-log.txt
+          tail -n 200 spinoff_out/scan-log.txt > /tmp/log && mv /tmp/log spinoff_out/scan-log.txt
+
+      - name: Run summary
         run: |
           echo "### Weekly spinoff scan" >> $GITHUB_STEP_SUMMARY
-          if [ -f spinoff_out/spinoffs.csv ]; then
-            # subtract the header row
-            N=$(($(wc -l < spinoff_out/spinoffs.csv) - 1))
-            echo "Form 10 filings found: **$N**" >> $GITHUB_STEP_SUMMARY
-            if [ "$N" -gt 0 ]; then
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo "Apply the size filter before reading. Notes are in \`spinoff_out/notes/\`." >> $GITHUB_STEP_SUMMARY
-            fi
+          echo "10-12B filings found: **${{ steps.count.outputs.n }}**" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.count.outputs.n }}" -gt 0 ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Apply the size filter before reading. Notes in \`spinoff_out/notes/\`." >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cut -d, -f1,2,3 spinoff_out/spinoffs.csv >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
           else
-            echo "No CSV produced — check the run log above for errors." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Nothing to read. Normal - most weeks are empty." >> $GITHUB_STEP_SUMMARY
           fi
 
       - name: Commit results
@@ -56,8 +78,30 @@ jobs:
           git config user.email "actions@github.com"
           git add spinoff_out/
           if git diff --staged --quiet; then
-            echo "Nothing new this week."
+            echo "No changes."
           else
-            git commit -m "scan: $(date -u +%Y-%m-%d)"
+            git commit -m "scan $(date -u +%Y-%m-%d): ${{ steps.count.outputs.n }} filings"
             git push
           fi
+
+      - name: Open an issue if there is something to read
+        if: steps.count.outputs.n > 0
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo "Scan of $(date -u +%Y-%m-%d) found ${{ steps.count.outputs.n }} 10-12B filing(s)."
+            echo ""
+            echo '```'
+            cut -d, -f1,2,3,8,9 spinoff_out/spinoffs.csv
+            echo '```'
+            echo ""
+            echo "1. Size filter first - discard anything over ~\$500M market cap **unread**."
+            echo "2. For survivors: who is forced to sell, why, and is that reason unrelated to value?"
+            echo "3. If no forced seller can be named, cut it."
+            echo ""
+            echo "Notes: \`spinoff_out/notes/\`. Close this issue once triaged."
+          } > /tmp/issue_body.md
+          gh issue create \
+            --title "Spinoff scan $(date -u +%Y-%m-%d): ${{ steps.count.outputs.n }} to triage" \
+            --body-file /tmp/issue_body.md

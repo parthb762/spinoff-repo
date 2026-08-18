@@ -1,0 +1,63 @@
+name: Weekly spinoff scan
+
+on:
+  schedule:
+    # 08:00 Mon Brisbane (AEST, UTC+10) = 22:00 Sun UTC
+    - cron: "0 22 * * 0"
+  workflow_dispatch:        # lets you trigger a run by hand from the Actions tab
+
+permissions:
+  contents: write           # needed to commit results back to the repo
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install requests
+
+      - name: Run discovery
+        env:
+          SEC_EMAIL: ${{ secrets.SEC_EMAIL }}
+        run: |
+          if [ -z "$SEC_EMAIL" ]; then
+            echo "::error::SEC_EMAIL secret not set. Add it in Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+          python scripts/spinoff_watch.py \
+            --email "$SEC_EMAIL" \
+            --days 10 \
+            --out ./spinoff_out
+
+      - name: Summarise to the run log
+        run: |
+          echo "### Weekly spinoff scan" >> $GITHUB_STEP_SUMMARY
+          if [ -f spinoff_out/spinoffs.csv ]; then
+            # subtract the header row
+            N=$(($(wc -l < spinoff_out/spinoffs.csv) - 1))
+            echo "Form 10 filings found: **$N**" >> $GITHUB_STEP_SUMMARY
+            if [ "$N" -gt 0 ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "Apply the size filter before reading. Notes are in \`spinoff_out/notes/\`." >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "No CSV produced — check the run log above for errors." >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Commit results
+        run: |
+          git config user.name  "spinoff-watch bot"
+          git config user.email "actions@github.com"
+          git add spinoff_out/
+          if git diff --staged --quiet; then
+            echo "Nothing new this week."
+          else
+            git commit -m "scan: $(date -u +%Y-%m-%d)"
+            git push
+          fi

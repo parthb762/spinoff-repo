@@ -1,1 +1,3 @@
 filed,form,company,cik,ticker,exchange,sic_desc,xbrl,xbrl_stale,xbrl_latest_period,xbrl_age_months,shares_out,shares_dei,revenue,revenue_alt,op_income,net_income,total_debt,debt_current,equity,cash,state,filing_index
+2026-09-03,10-12B/A,"MSGS Spinco, Inc.",2132873,,,Services-Miscellaneous Amusement & Recreation,none-yet,,,,,,,,,,,,,,NV,https://www.sec.gov/Archives/edgar/data/2132873/000119312526381915/0001193125-26-381915-index.htm
+2026-08-31,10-12B,West Coast Community Bancorp,2105965,,,State Commercial Banks,none-yet,,,,,,,,,,,,,,CA,https://www.sec.gov/Archives/edgar/data/2105965/000162828026059592/0001628280-26-059592-index.htm

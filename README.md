@@ -1,6 +1,9 @@
 # spinoff-watch
 
-Weekly EDGAR scan for US spin-off registrations (Form 10 / 10-12B / 10-12G).
+Weekly EDGAR scan for two special-situation categories:
+
+- **Spin-offs** — Form 10-12B registrations (`scripts/spinoff_watch.py`)
+- **Post-reorg equity** — 8-K Chapter 11 filings and emergences (`scripts/reorg_watch.py`)
 
 Discovery and fact-extraction are automated. **Analysis is not, by design** —
 the edge is in reading the filings, so this repo hands you filings, not verdicts.
@@ -26,6 +29,16 @@ Runs automatically 08:00 Monday Brisbane time. Adjust the cron in
    **who is forced to sell, why, and is that reason unrelated to value?**
    If you can't name a specific forced seller, cut it.
 4. If it survives, fill a thesis note before taking a paper position.
+
+## Post-reorg notes
+
+- `notes/reorg/` — EMERGENCE candidates. New equity issued to creditors.
+- `notes/reorg-watch/` — companies in Chapter 11. **Never buy the old equity**;
+  they reappear as candidates only if they emerge.
+- Pre-emergence XBRL describes the cancelled capital structure — size from the
+  plan valuation instead.
+- Discard if the new equity is Pink with no current information, or the
+  company files a Form 15 to stop reporting.
 
 ## Why commit the notes
 

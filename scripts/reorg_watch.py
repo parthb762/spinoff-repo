@@ -59,9 +59,11 @@ EMERGENCE_PHRASES = [
 EMERGENCE_ITEMS = {"3.02", "3.03", "5.01", "5.03"}
 
 # A company that emerges under a NEW holding company files as a successor
-# issuer (8-K12B / 8-K12G3), not a plain 8-K. Spirit Airlines' March 2025
-# emergence (as Spirit Aviation Holdings) was missed until these were added.
-EMERGENCE_FORMS = "8-K,8-K12B,8-K12G3"
+# issuer (8-K12B / 8-K12G3 / 8-K15D5), not a plain 8-K. Spirit Airlines'
+# March 2025 emergence was filed by Spirit Aviation Holdings as an 8-K15D5
+# and was missed until these were added.
+EMERGENCE_FORMS = "8-K,8-K12B,8-K12G3,8-K15D5"
+SUCCESSOR_PREFIXES = ("8-K12", "8-K15D5")
 BANKRUPTCY_FORMS = "8-K"
 BANKRUPTCY_QUERY = '"chapter 11"'
 PAGE = 100
@@ -153,7 +155,7 @@ def classify(emergence_rows, bankruptcy_rows):
 
     for r in emergence_rows:
         items = set((r.get("items") or "").split(","))
-        if items & EMERGENCE_ITEMS or str(r.get("form", "")).upper().startswith("8-K12"):
+        if items & EMERGENCE_ITEMS or str(r.get("form", "")).upper().startswith(SUCCESSOR_PREFIXES):
             keep(r, "EMERGENCE")
         elif "1.03" in items:
             keep(r, "BANKRUPTCY")      # e.g. a first-day filing describing its plan
@@ -172,7 +174,7 @@ def dropped(emergence_rows, kept):
     for r in emergence_rows:
         items = set((r.get("items") or "").split(","))
         if (items & EMERGENCE_ITEMS or "1.03" in items or r["cik"] in kept_ciks
-                or str(r.get("form", "")).upper().startswith("8-K12")):
+                or str(r.get("form", "")).upper().startswith(SUCCESSOR_PREFIXES)):
             continue
         cur = out.get(r["cik"])
         if cur is None or r["filed"] > cur["filed"]:
@@ -347,11 +349,11 @@ def self_test():
         _hit(6666, "Spirit Aviation Holdings, Inc.  (FLYY)  (CIK 0002050000)", "2025-03-12",
              "0002050000-25-000001", ["8.01", "9.01"]),
     ]))
-    succ[0]["form"] = "8-K12B"
-    assert classify(succ, [])[0]["status"] == "EMERGENCE", "successor-issuer 8-K12B is an emergence"
+    succ[0]["form"] = "8-K15D5"
+    assert classify(succ, [])[0]["status"] == "EMERGENCE", "successor-issuer 8-K15D5 is an emergence"
     assert dropped(succ, []) == []
-    assert "forms=8-K%2C8-K12B" in fts_url("x", date(2025, 1, 1), date(2025, 2, 1), 0, EMERGENCE_FORMS)
-    print("PASS  classify: successor-issuer 8-K12B counts as emergence and is searched")
+    assert "8-K15D5" in fts_url("x", date(2025, 1, 1), date(2025, 2, 1), 0, EMERGENCE_FORMS)
+    print("PASS  classify: successor-issuer forms (8-K12B/12G3/15D5) count as emergence and is searched")
     dr = dropped(em + noisy, rows)
     assert [r["cik"] for r in dr] == [5555], dr
     assert dr[0]["status"] == "DROPPED"

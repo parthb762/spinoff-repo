@@ -40,9 +40,17 @@ FILING_IDX = "https://www.sec.gov/Archives/edgar/data/{cik}/{acc_nodash}/{acc}-i
 EMERGENCE_PHRASES = [
     '"emerged from chapter 11"',
     '"emergence from chapter 11"',
+    '"emerged from bankruptcy"',
     '"plan of reorganization became effective"',
-    '"effective date of the plan"',
 ]
+# "effective date of the plan" was dropped: it also matches equity-incentive
+# plans and merger plans (TechPrecision, Aureus Greenway false positives, Oct 2026).
+
+# An emergence 8-K reports the new capital structure: new securities (3.02),
+# changed holder rights (3.03), change in control (5.01) or a new charter (5.03).
+# A filing-day 8-K (Item 1.03 + DIP loan 1.01/2.03 + delisting notice 3.01)
+# has none of these, even when the text talks about "the plan".
+EMERGENCE_ITEMS = {"3.02", "3.03", "5.01", "5.03"}
 BANKRUPTCY_QUERY = '"chapter 11"'
 PAGE = 100
 MAX_PAGES = 5
@@ -132,7 +140,12 @@ def classify(emergence_rows, bankruptcy_rows):
             best[row["cik"]] = row
 
     for r in emergence_rows:
-        keep(r, "EMERGENCE")
+        items = set((r.get("items") or "").split(","))
+        if items & EMERGENCE_ITEMS:
+            keep(r, "EMERGENCE")
+        elif "1.03" in items:
+            keep(r, "BANKRUPTCY")      # e.g. a first-day filing describing its plan
+        # otherwise: phrase matched but no capital-structure change -> noise
     for r in bankruptcy_rows:
         if "1.03" in (r.get("items") or "").split(","):
             keep(r, "BANKRUPTCY")
@@ -278,8 +291,17 @@ def self_test():
     assert len(bk) == 3, "malformed hit should be skipped"
     print("PASS  parse: malformed hits skipped without crashing")
 
-    rows = classify(em, bk)
+    noisy = parse_hits(_fixture([
+        _hit(4444, "Leslie's, Inc.  (LESL)  (CIK 0001821806)", "2026-10-05",
+             "0001193125-26-414287", ["1.01", "1.03", "2.03", "3.01", "9.01"]),  # filing day
+        _hit(5555, "TechPrecision Corp  (TPCS)  (CIK 0001328792)", "2026-09-29",
+             "0001104659-26-111987", ["5.02", "5.07", "9.01"]),                  # equity plan vote
+    ]))
+    rows = classify(em + noisy, bk)
     by = {r["cik"]: r for r in rows}
+    assert by[4444]["status"] == "BANKRUPTCY", "filing-day 8-K is not an emergence"
+    assert 5555 not in by, "phrase hit without capital-structure items is noise"
+    print("PASS  classify: filing-day 8-K demoted to watch; equity-plan noise dropped")
     assert by[1111]["status"] == "EMERGENCE", "emergence must beat an earlier filing"
     assert by[2222]["status"] == "BANKRUPTCY"
     assert 3333 not in by, "a passing mention of chapter 11 without Item 1.03 is noise"

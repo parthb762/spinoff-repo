@@ -57,6 +57,12 @@ EMERGENCE_PHRASES = [
 # A filing-day 8-K (Item 1.03 + DIP loan 1.01/2.03 + delisting notice 3.01)
 # has none of these, even when the text talks about "the plan".
 EMERGENCE_ITEMS = {"3.02", "3.03", "5.01", "5.03"}
+
+# A company that emerges under a NEW holding company files as a successor
+# issuer (8-K12B / 8-K12G3), not a plain 8-K. Spirit Airlines' March 2025
+# emergence (as Spirit Aviation Holdings) was missed until these were added.
+EMERGENCE_FORMS = "8-K,8-K12B,8-K12G3"
+BANKRUPTCY_FORMS = "8-K"
 BANKRUPTCY_QUERY = '"chapter 11"'
 PAGE = 100
 MAX_PAGES = 5
@@ -64,9 +70,9 @@ MAX_PAGES = 5
 
 # ---------------------------------------------------------------- search
 
-def fts_url(query, start, end, offset=0):
+def fts_url(query, start, end, offset=0, forms="8-K"):
     return FTS + "?" + urlencode({
-        "q": query, "forms": "8-K",
+        "q": query, "forms": forms,
         "dateRange": "custom", "category": "custom",
         "startdt": start.isoformat(), "enddt": end.isoformat(),
         "from": offset,
@@ -113,10 +119,10 @@ def total_hits(payload):
     return t.get("value", 0) if isinstance(t, dict) else int(t or 0)
 
 
-def search(f, query, start, end, max_pages=None):
+def search(f, query, start, end, max_pages=None, forms="8-K"):
     out = []
     for p in range(max_pages or MAX_PAGES):
-        data = f.get(fts_url(query, start, end, p * PAGE), expect="json")
+        data = f.get(fts_url(query, start, end, p * PAGE, forms), expect="json")
         if not data:
             break
         page = parse_hits(data)
@@ -147,7 +153,7 @@ def classify(emergence_rows, bankruptcy_rows):
 
     for r in emergence_rows:
         items = set((r.get("items") or "").split(","))
-        if items & EMERGENCE_ITEMS:
+        if items & EMERGENCE_ITEMS or str(r.get("form", "")).upper().startswith("8-K12"):
             keep(r, "EMERGENCE")
         elif "1.03" in items:
             keep(r, "BANKRUPTCY")      # e.g. a first-day filing describing its plan
@@ -165,7 +171,8 @@ def dropped(emergence_rows, kept):
     out = {}
     for r in emergence_rows:
         items = set((r.get("items") or "").split(","))
-        if items & EMERGENCE_ITEMS or "1.03" in items or r["cik"] in kept_ciks:
+        if (items & EMERGENCE_ITEMS or "1.03" in items or r["cik"] in kept_ciks
+                or str(r.get("form", "")).upper().startswith("8-K12")):
             continue
         cur = out.get(r["cik"])
         if cur is None or r["filed"] > cur["filed"]:
@@ -336,6 +343,15 @@ def self_test():
     assert by[4444]["status"] == "BANKRUPTCY", "filing-day 8-K is not an emergence"
     assert 5555 not in by, "phrase hit without capital-structure items is noise"
     print("PASS  classify: filing-day 8-K demoted to watch; equity-plan noise dropped")
+    succ = parse_hits(_fixture([
+        _hit(6666, "Spirit Aviation Holdings, Inc.  (FLYY)  (CIK 0002050000)", "2025-03-12",
+             "0002050000-25-000001", ["8.01", "9.01"]),
+    ]))
+    succ[0]["form"] = "8-K12B"
+    assert classify(succ, [])[0]["status"] == "EMERGENCE", "successor-issuer 8-K12B is an emergence"
+    assert dropped(succ, []) == []
+    assert "forms=8-K%2C8-K12B" in fts_url("x", date(2025, 1, 1), date(2025, 2, 1), 0, EMERGENCE_FORMS)
+    print("PASS  classify: successor-issuer 8-K12B counts as emergence and is searched")
     dr = dropped(em + noisy, rows)
     assert [r["cik"] for r in dr] == [5555], dr
     assert dr[0]["status"] == "DROPPED"
@@ -396,8 +412,8 @@ def main():
 
     em = []
     for q in EMERGENCE_PHRASES:
-        em.extend(search(f, q, start, end, a.max_pages))
-    bk = search(f, BANKRUPTCY_QUERY, start, end, a.max_pages)
+        em.extend(search(f, q, start, end, a.max_pages, EMERGENCE_FORMS))
+    bk = search(f, BANKRUPTCY_QUERY, start, end, a.max_pages, BANKRUPTCY_FORMS)
     rows = classify(em, bk)
 
     if not a.no_enrich:

@@ -1,0 +1,74 @@
+name: Reorg back-test
+
+# Manual only. Re-runs the post-reorg scanner over a past window to check the
+# emergence filter still catches known emergences. Commits nothing, opens no
+# issue; results go to the run summary and a downloadable artifact.
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "Start date (YYYY-MM-DD)"
+        default: "2025-01-01"
+      end:
+        description: "End date (YYYY-MM-DD)"
+        default: "2025-12-31"
+      expect:
+        description: "Companies that should show as EMERGENCE (comma-separated, case-insensitive)"
+        default: "Spirit,Wolfspeed"
+
+permissions:
+  contents: read
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests
+
+      - name: Run back-test
+        env:
+          SEC_EMAIL: ${{ secrets.SEC_EMAIL }}
+        run: |
+          python scripts/reorg_watch.py --email "$SEC_EMAIL" \
+            --start "${{ inputs.start }}" --end "${{ inputs.end }}" \
+            --max-pages 20 --no-enrich --no-notes --out ./backtest_out
+
+      - name: Summary
+        run: |
+          E=backtest_out/reorg.csv; D=backtest_out/reorg_dropped.csv
+          {
+            echo "### Reorg back-test ${{ inputs.start }} to ${{ inputs.end }}"
+            echo ""
+            echo "| | Count |"
+            echo "|---|---|"
+            echo "| Emergences kept | $(grep -c '^EMERGENCE,' $E || true) |"
+            echo "| Chapter 11 watch | $(grep -c '^BANKRUPTCY,' $E || true) |"
+            echo "| Phrase hits dropped by item filter | $(($(wc -l < $D) - 1)) |"
+            echo ""
+            echo "**Expected emergences**"
+            echo ""
+            IFS=',' read -ra NAMES <<< "${{ inputs.expect }}"
+            for n in "${NAMES[@]}"; do
+              n=$(echo "$n" | xargs); [ -z "$n" ] && continue
+              if grep -i '^EMERGENCE,' $E | grep -qi "$n"; then echo "- ✅ $n: kept as emergence"
+              elif grep -qi "$n" $D; then echo "- ❌ $n: **dropped by item filter** (items: $(python3 -c "import csv,sys; print(next((r['items'] for r in csv.DictReader(open('$D')) if sys.argv[1].lower() in r['company'].lower()),'?'))" "$n"))"
+              elif grep -i '^BANKRUPTCY,' $E | grep -qi "$n"; then echo "- ⚠️ $n: classed as Chapter 11 watch only"
+              else echo "- ❔ $n: not matched by any emergence phrase"; fi
+            done
+            echo ""
+            echo "<details><summary>Emergences kept</summary>"
+            echo ""; echo '```'; grep '^EMERGENCE,' $E | cut -d, -f2-5 || true; echo '```'; echo "</details>"
+            echo ""
+            echo "<details><summary>Dropped by item filter</summary>"
+            echo ""; echo '```'; tail -n +2 $D | cut -d, -f2-7 || true; echo '```'; echo "</details>"
+          } >> $GITHUB_STEP_SUMMARY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reorg-backtest
+          path: backtest_out/

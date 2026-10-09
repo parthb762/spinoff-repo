@@ -17,6 +17,12 @@ It does not rank, summarise, or judge. Reading the plan is the user's job.
 USAGE
   python reorg_watch.py --email you@example.com --days 10
   python reorg_watch.py --self-test
+  python reorg_watch.py --email you@example.com --start 2025-01-01 --end 2025-12-31 \
+      --no-enrich --no-notes --out ./backtest_out      # back-test a past window
+
+Every run also writes reorg_dropped.csv: emergence-phrase hits that the
+item filter threw away. Skim it now and then to check the filter is not
+discarding real emergences.
 
 Uses EDGAR full-text search (efts.sec.gov) — the backend of SEC's own search
 page. Same User-Agent and rate-limit rules as the rest of EDGAR apply.
@@ -107,9 +113,9 @@ def total_hits(payload):
     return t.get("value", 0) if isinstance(t, dict) else int(t or 0)
 
 
-def search(f, query, start, end):
+def search(f, query, start, end, max_pages=None):
     out = []
-    for p in range(MAX_PAGES):
+    for p in range(max_pages or MAX_PAGES):
         data = f.get(fts_url(query, start, end, p * PAGE), expect="json")
         if not data:
             break
@@ -150,6 +156,21 @@ def classify(emergence_rows, bankruptcy_rows):
         if "1.03" in (r.get("items") or "").split(","):
             keep(r, "BANKRUPTCY")
     return sorted(best.values(), key=lambda r: (r["status"] != "EMERGENCE", r["filed"]), reverse=False)
+
+
+def dropped(emergence_rows, kept):
+    """Emergence-phrase hits discarded by the item filter, one per company,
+    excluding companies that were kept anyway. For auditing the filter."""
+    kept_ciks = {r["cik"] for r in kept}
+    out = {}
+    for r in emergence_rows:
+        items = set((r.get("items") or "").split(","))
+        if items & EMERGENCE_ITEMS or "1.03" in items or r["cik"] in kept_ciks:
+            continue
+        cur = out.get(r["cik"])
+        if cur is None or r["filed"] > cur["filed"]:
+            out[r["cik"]] = dict(r, status="DROPPED")
+    return sorted(out.values(), key=lambda r: r["filed"])
 
 
 # ---------------------------------------------------------------- output
@@ -225,7 +246,20 @@ COLUMNS = ["status", "filed", "form", "company", "ticker", "cik", "items",
            "filing_index"]
 
 
-def write_outputs(rows, outdir):
+def write_dropped(rows, outdir):
+    os.makedirs(outdir, exist_ok=True)
+    path = os.path.join(outdir, "reorg_dropped.csv")
+    with open(path, "w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=["status", "filed", "form", "company",
+                                           "ticker", "cik", "items", "filing_index"],
+                           extrasaction="ignore")
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+    return path
+
+
+def write_outputs(rows, outdir, notes=True):
     os.makedirs(outdir, exist_ok=True)
     csv_path = os.path.join(outdir, "reorg.csv")
     with open(csv_path, "w", newline="") as fh:
@@ -235,7 +269,7 @@ def write_outputs(rows, outdir):
             w.writerow(r)
 
     made = []
-    for r in rows:
+    for r in (rows if notes else []):
         sub = "reorg" if r["status"] == "EMERGENCE" else "reorg-watch"
         d = os.path.join(outdir, "notes", sub)
         os.makedirs(d, exist_ok=True)
@@ -302,6 +336,10 @@ def self_test():
     assert by[4444]["status"] == "BANKRUPTCY", "filing-day 8-K is not an emergence"
     assert 5555 not in by, "phrase hit without capital-structure items is noise"
     print("PASS  classify: filing-day 8-K demoted to watch; equity-plan noise dropped")
+    dr = dropped(em + noisy, rows)
+    assert [r["cik"] for r in dr] == [5555], dr
+    assert dr[0]["status"] == "DROPPED"
+    print("PASS  dropped: filtered phrase hits are kept for audit, kept companies excluded")
     assert by[1111]["status"] == "EMERGENCE", "emergence must beat an earlier filing"
     assert by[2222]["status"] == "BANKRUPTCY"
     assert 3333 not in by, "a passing mention of chapter 11 without Item 1.03 is noise"
@@ -339,6 +377,11 @@ def main():
     ap.add_argument("--days", type=int, default=10)
     ap.add_argument("--out", default="./spinoff_out")
     ap.add_argument("--no-enrich", action="store_true")
+    ap.add_argument("--max-pages", type=int, default=MAX_PAGES,
+                    help="100 hits per page per query (raise for long back-tests)")
+    ap.add_argument("--no-notes", action="store_true", help="CSV only (back-tests)")
+    ap.add_argument("--start", help="YYYY-MM-DD; overrides --days")
+    ap.add_argument("--end", help="YYYY-MM-DD; default today")
     ap.add_argument("--self-test", action="store_true")
     a = ap.parse_args()
     if a.self_test:
@@ -346,25 +389,28 @@ def main():
     if not a.email:
         ap.error("--email is required (SEC blocks anonymous scrapers)")
 
-    end = date.today()
-    start = end - timedelta(days=a.days)
+    end = date.fromisoformat(a.end) if a.end else date.today()
+    start = date.fromisoformat(a.start) if a.start else end - timedelta(days=a.days)
     f = Fetcher(a.email)
     print(f"Scanning 8-Ks for Chapter 11 activity {start} .. {end}", file=sys.stderr)
 
     em = []
     for q in EMERGENCE_PHRASES:
-        em.extend(search(f, q, start, end))
-    bk = search(f, BANKRUPTCY_QUERY, start, end)
+        em.extend(search(f, q, start, end, a.max_pages))
+    bk = search(f, BANKRUPTCY_QUERY, start, end, a.max_pages)
     rows = classify(em, bk)
 
     if not a.no_enrich:
         for r in rows:
             enrich(f, r)
 
-    csv_path, made = write_outputs(rows, a.out)
+    csv_path, made = write_outputs(rows, a.out, notes=not a.no_notes)
+    dr = dropped(em, rows)
+    write_dropped(dr, a.out)
     n_em = sum(r["status"] == "EMERGENCE" for r in rows)
     n_bk = sum(r["status"] == "BANKRUPTCY" for r in rows)
-    print(f"\nEmergence candidates: {n_em}   Chapter 11 watch: {n_bk}")
+    print(f"\nEmergence candidates: {n_em}   Chapter 11 watch: {n_bk}   "
+          f"Dropped by item filter: {len(dr)}")
     print(f"CSV: {csv_path}   ({len(made)} new notes)")
     return 0
 

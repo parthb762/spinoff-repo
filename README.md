@@ -50,3 +50,15 @@ when you write it, not when you score it.
 
     pip install requests
     python scripts/spinoff_watch.py --email you@example.com --days 30 --out ./spinoff_out
+
+## Checking the reorg filter
+
+The emergence filter only keeps 8-Ks that report a new capital structure
+(Items 3.02, 3.03, 5.01 or 5.03). Anything a phrase matched but the filter
+threw away is listed in `spinoff_out/reorg_dropped.csv` after every run —
+skim it occasionally for a real emergence that slipped through.
+
+To test the filter against a past window, run **Actions → Reorg back-test →
+Run workflow**. It scans the dates you give (default: all of 2025), checks the
+companies in "expect" (default: Spirit, Wolfspeed — both emerged in 2025) and
+reports each as kept, dropped, or missed. It commits nothing and opens no issue.

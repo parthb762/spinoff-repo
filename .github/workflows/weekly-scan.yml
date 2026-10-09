@@ -8,7 +8,7 @@ on:
 
 permissions:
   contents: write
-  issues: write             # so a hit can open an issue as a notification
+  issues: write
 
 jobs:
   scan:
@@ -23,7 +23,7 @@ jobs:
       - name: Install deps
         run: pip install requests
 
-      - name: Run discovery
+      - name: Check secret
         env:
           SEC_EMAIL: ${{ secrets.SEC_EMAIL }}
         run: |
@@ -31,46 +31,61 @@ jobs:
             echo "::error::SEC_EMAIL secret not set. Settings > Secrets and variables > Actions."
             exit 1
           fi
-          python scripts/spinoff_watch.py \
-            --email "$SEC_EMAIL" \
-            --days 10 \
-            --out ./spinoff_out
+
+      - name: Spin-off discovery (10-12B)
+        env:
+          SEC_EMAIL: ${{ secrets.SEC_EMAIL }}
+        run: python scripts/spinoff_watch.py --email "$SEC_EMAIL" --days 10 --out ./spinoff_out
+
+      - name: Post-reorg discovery (8-K Chapter 11 / emergence)
+        # continue-on-error: a failure here must not block the spin-off results
+        continue-on-error: true
+        env:
+          SEC_EMAIL: ${{ secrets.SEC_EMAIL }}
+        run: python scripts/reorg_watch.py --email "$SEC_EMAIL" --days 10 --out ./spinoff_out
 
       - name: Count results
         id: count
         run: |
-          if [ -f spinoff_out/spinoffs.csv ]; then
-            N=$(($(wc -l < spinoff_out/spinoffs.csv) - 1))
+          count_rows () { if [ -f "$1" ]; then n=$(($(wc -l < "$1") - 1)); [ "$n" -lt 0 ] && n=0; echo $n; else echo 0; fi; }
+          S=$(count_rows spinoff_out/spinoffs.csv)
+          if [ -f spinoff_out/reorg.csv ]; then
+            E=$(grep -c '^EMERGENCE,' spinoff_out/reorg.csv || true)
+            B=$(grep -c '^BANKRUPTCY,' spinoff_out/reorg.csv || true)
+            R=ok
           else
-            N=0
+            E=0; B=0; R=failed
           fi
-          if [ "$N" -lt 0 ]; then N=0; fi
-          echo "n=$N" >> $GITHUB_OUTPUT
-          echo "Found $N filings"
+          echo "spin=$S"   >> $GITHUB_OUTPUT
+          echo "emerge=$E" >> $GITHUB_OUTPUT
+          echo "watch=$B"  >> $GITHUB_OUTPUT
+          echo "reorg=$R"  >> $GITHUB_OUTPUT
+          echo "spin=$S emerge=$E watch=$B reorg=$R"
 
       - name: Heartbeat
-        # Always writes, so there is a commit every week even on empty scans.
-        # Without this, GitHub disables the cron after 60 days of no activity.
+        # Always writes, so there is a commit every week — stops GitHub disabling the cron.
         run: |
           mkdir -p spinoff_out
-          echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)  10-12B filings: ${{ steps.count.outputs.n }}" \
+          echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)  10-12B: ${{ steps.count.outputs.spin }}  emergence: ${{ steps.count.outputs.emerge }}  ch11-watch: ${{ steps.count.outputs.watch }}  reorg-scan: ${{ steps.count.outputs.reorg }}" \
             >> spinoff_out/scan-log.txt
           tail -n 200 spinoff_out/scan-log.txt > /tmp/log && mv /tmp/log spinoff_out/scan-log.txt
 
       - name: Run summary
         run: |
-          echo "### Weekly spinoff scan" >> $GITHUB_STEP_SUMMARY
-          echo "10-12B filings found: **${{ steps.count.outputs.n }}**" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ steps.count.outputs.n }}" -gt 0 ]; then
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Apply the size filter before reading. Notes in \`spinoff_out/notes/\`." >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-            cut -d, -f1,2,3 spinoff_out/spinoffs.csv >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-          else
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Nothing to read. Normal - most weeks are empty." >> $GITHUB_STEP_SUMMARY
-          fi
+          {
+            echo "### Weekly special-situations scan"
+            echo "| Category | Count |"
+            echo "|---|---|"
+            echo "| Spin-offs (10-12B) | **${{ steps.count.outputs.spin }}** |"
+            echo "| Post-reorg emergences | **${{ steps.count.outputs.emerge }}** |"
+            echo "| Chapter 11 watch (do not buy old equity) | ${{ steps.count.outputs.watch }} |"
+            if [ "${{ steps.count.outputs.reorg }}" = "failed" ]; then
+              echo ""
+              echo "Post-reorg scan failed this week - check the step log. Spin-off results are unaffected."
+            fi
+            echo ""
+            echo "Size filter first. Notes: \`notes/\` (spin-offs), \`notes/reorg/\`, \`notes/reorg-watch/\`."
+          } >> $GITHUB_STEP_SUMMARY
 
       - name: Commit results
         run: |
@@ -80,28 +95,39 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes."
           else
-            git commit -m "scan $(date -u +%Y-%m-%d): ${{ steps.count.outputs.n }} filings"
+            git commit -m "scan $(date -u +%Y-%m-%d): ${{ steps.count.outputs.spin }} spinoffs, ${{ steps.count.outputs.emerge }} emergences"
             git push
           fi
 
       - name: Open an issue if there is something to read
-        if: steps.count.outputs.n > 0
+        # Chapter 11 watch items alone never trigger an issue — too noisy, nothing to act on.
+        if: steps.count.outputs.spin > 0 || steps.count.outputs.emerge > 0
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           {
-            echo "Scan of $(date -u +%Y-%m-%d) found ${{ steps.count.outputs.n }} 10-12B filing(s)."
+            echo "Scan of $(date -u +%Y-%m-%d)."
             echo ""
-            echo '```'
-            cut -d, -f1,2,3,8,9 spinoff_out/spinoffs.csv
-            echo '```'
+            if [ "${{ steps.count.outputs.spin }}" -gt 0 ]; then
+              echo "**Spin-offs (${{ steps.count.outputs.spin }})**"
+              echo '```'
+              cut -d, -f1,2,3 spinoff_out/spinoffs.csv
+              echo '```'
+            fi
+            if [ "${{ steps.count.outputs.emerge }}" -gt 0 ]; then
+              echo "**Post-reorg emergences (${{ steps.count.outputs.emerge }})**"
+              echo '```'
+              grep '^EMERGENCE,' spinoff_out/reorg.csv | cut -d, -f2,4,5
+              echo '```'
+              echo "Read references/post-reorg.md first. Pre-emergence XBRL is the dead capital structure."
+            fi
             echo ""
-            echo "1. Size filter first - discard anything over ~\$500M market cap **unread**."
-            echo "2. For survivors: who is forced to sell, why, and is that reason unrelated to value?"
-            echo "3. If no forced seller can be named, cut it."
+            echo "1. Size filter first - over ~\$500M, discard unread. Shell names hide big parents."
+            echo "2. Post-reorg: Pink with no info, or a Form 15 filing -> discard."
+            echo "3. Who is forced to sell, and is it unrelated to value? No forced seller -> cut."
             echo ""
-            echo "Notes: \`spinoff_out/notes/\`. Close this issue once triaged."
+            echo "Close this issue once triaged."
           } > /tmp/issue_body.md
           gh issue create \
-            --title "Spinoff scan $(date -u +%Y-%m-%d): ${{ steps.count.outputs.n }} to triage" \
+            --title "Special-situations scan $(date -u +%Y-%m-%d): ${{ steps.count.outputs.spin }} spinoffs, ${{ steps.count.outputs.emerge }} emergences" \
             --body-file /tmp/issue_body.md

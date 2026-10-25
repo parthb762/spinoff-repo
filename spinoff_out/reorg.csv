@@ -1,2 +1,4 @@
 status,filed,form,company,ticker,cik,items,sic_desc,xbrl,xbrl_stale,revenue,revenue_alt,filing_index
-BANKRUPTCY,2026-10-16,8-K,"CUMULUS MEDIA INC  (CMLS, CMLSQ)","CMLS,CMLSQ",1058623,"1.01,1.02,1.03,2.03,3.02,3.03,5.01,5.02,5.03,7.01,8.01,9.01",Radio Broadcasting Stations,yes,,,332354000,https://www.sec.gov/Archives/edgar/data/1058623/000110465926116470/0001104659-26-116470-index.htm
+BANKRUPTCY,2026-10-16,8-K,"CUMULUS MEDIA INC  (CMLS, CMLSQ)",CMLSQ,1058623,"1.01,1.02,1.03,2.03,3.02,3.03,5.01,5.02,5.03,7.01,8.01,9.01",Radio Broadcasting Stations,yes,,,332354000,https://www.sec.gov/Archives/edgar/data/1058623/000110465926116470/0001104659-26-116470-index.htm
+BANKRUPTCY,2026-10-21,8-K,"Getty Images Holdings, Inc.","GETYQ,GETY",1898496,"1.03,2.04,7.01,9.01","Services-Business Services, NEC",yes,,926244000,455671000,https://www.sec.gov/Archives/edgar/data/1898496/000121390026111193/0001213900-26-111193-index.htm
+BANKRUPTCY,2026-10-22,8-K,"Leslie's, Inc.  (LESL, LESLQ)",LESLQ,1821806,"1.03,9.01","Retail-Retail Stores, NEC",yes,,,790365000,https://www.sec.gov/Archives/edgar/data/1821806/000119312526428048/0001193125-26-428048-index.htm
